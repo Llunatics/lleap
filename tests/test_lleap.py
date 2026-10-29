@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from lleap.cli import _parse_sets, cmd_lab  # noqa: E402
 from lleap.lab import start_lab  # noqa: E402
 from lleap.payloads import GROUPS, Payload, payloads_for  # noqa: E402
 from lleap.scanner import (  # noqa: E402
@@ -56,10 +57,19 @@ class TestCatalog(unittest.TestCase):
 
 class TestClassify(unittest.TestCase):
     def test_lab_success_is_fetched(self):
-        body = json.dumps({"fetched_status": 200, "fetched_url": "x"})
+        body = json.dumps({"lleap_lab": True,
+                           "fetched_status": 200, "fetched_url": "x"})
         verdict, _ = classify(Payload("http://127.0.0.1/", "localhost", ""),
                               200, None, body)
         self.assertEqual(verdict, "FETCHED")
+
+    def test_lab_json_without_marker_is_not_trusted(self):
+        # Any JSON API can return a field named "fetched_status"; without
+        # the lab marker it must not count as lab ground truth.
+        body = json.dumps({"fetched_status": 200, "fetched_url": "x"})
+        verdict, _ = classify(Payload("http://127.0.0.1/", "localhost", ""),
+                              200, None, body)
+        self.assertEqual(verdict, "UNCLEAR")
 
     def test_lab_failure_is_unclear(self):
         body = json.dumps({"fetched_status": None,
@@ -82,6 +92,20 @@ class TestClassify(unittest.TestCase):
         payload = Payload("https:evil.example.com", "redirect", "")
         verdict, _ = classify(payload, 302, "https:evil.example.com", "")
         self.assertEqual(verdict, "OPEN-REDIRECT")
+
+    def test_redirect_host_case_and_trailing_dot(self):
+        # DNS names are case-insensitive; a trailing dot is the same host.
+        payload = Payload("https://evil.example.com/", "redirect", "")
+        for location in ("https://EVIL.EXAMPLE.COM/",
+                         "https://evil.example.com./",
+                         "//EVIL.EXAMPLE.COM/x"):
+            verdict, _ = classify(payload, 302, location, "")
+            self.assertEqual(verdict, "OPEN-REDIRECT", location)
+
+    def test_host_echo_is_case_insensitive(self):
+        verdict, _ = classify(Payload("http://localhost/", "localhost", ""),
+                              200, None, "RUN ON LOCALHOST FOR DEV")
+        self.assertEqual(verdict, "FETCHED")
 
     def test_same_host_redirect_is_not_open(self):
         payload = Payload("https://evil.example.com/", "redirect", "")
@@ -124,6 +148,31 @@ class TestTargetSafety(unittest.TestCase):
             check_target_safety("http://8.8.8.8/fetch?url={payload}", False)
         # With the flag, the safety check itself passes (no request is made).
         check_target_safety("http://8.8.8.8/fetch?url={payload}", True)
+
+    def test_ipv6_loopback_allowed(self):
+        # gethostbyname cannot resolve ::1, so IPv6 loopback targets
+        # used to be rejected even though they are loopback.
+        check_target_safety("http://[::1]:8901/fetch?url={payload}", False)
+
+    def test_ipv6_public_needs_flag(self):
+        with self.assertRaises(ValueError):
+            check_target_safety(
+                "http://[2606:4700:4700::1111]/fetch?url={payload}", False)
+        check_target_safety(
+            "http://[2606:4700:4700::1111]/fetch?url={payload}", True)
+
+
+class TestCliValidation(unittest.TestCase):
+    def test_empty_sets_rejected(self):
+        with self.assertRaises(SystemExit) as ctx:
+            _parse_sets("")
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_lab_port_out_of_range_rejected_cleanly(self):
+        import argparse
+        for port in (-1, 70000):
+            self.assertEqual(
+                cmd_lab(argparse.Namespace(port=port)), 2)
 
 
 class TestLabIntegration(unittest.TestCase):

@@ -112,7 +112,9 @@ Two deliberate safety behaviours:
 - **Public targets need `--allow-public-target`.** Loopback and private
   targets are always allowed; anything else requires an explicit opt-in,
   so a typo cannot turn a scan into traffic against someone else's
-  infrastructure.
+  infrastructure. The check covers IPv4 and IPv6 (including `[::1]`)
+  and refuses a hostname that resolves to a mix of local and public
+  addresses unless the flag is given.
 
 Server-supplied strings are stripped of ANSI escape sequences and control
 characters before they reach the terminal or a JSON report.
@@ -129,7 +131,7 @@ loopback.
 python3 -m unittest discover -s tests
 ```
 
-21 tests, standard library only, fully offline: the lab runs in a thread
+28 tests, standard library only, fully offline: the lab runs in a thread
 on 127.0.0.1, so integration tests exercise real fetching, redirect
 capture, and canary proof without touching the network.
 

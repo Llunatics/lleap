@@ -101,6 +101,7 @@ def make_handler(log: CanaryLog) -> type[BaseHTTPRequestHandler]:
                     # that was actually read is a successful fetch.
                     status = response.status if response.status is not None else 200
                     self._send_json(200, {
+                        "lleap_lab": True,
                         "fetched_status": status,
                         "fetched_url": response.geturl(),
                         "length": len(body),
@@ -114,6 +115,7 @@ def make_handler(log: CanaryLog) -> type[BaseHTTPRequestHandler]:
                 except Exception:
                     pass
                 self._send_json(200, {
+                    "lleap_lab": True,
                     "fetched_status": exc.code,
                     "fetched_url": target,
                     "length": len(body),
@@ -121,6 +123,7 @@ def make_handler(log: CanaryLog) -> type[BaseHTTPRequestHandler]:
                 })
             except Exception as exc:
                 self._send_json(200, {
+                    "lleap_lab": True,
                     "fetched_status": None,
                     "fetched_url": target,
                     "length": 0,

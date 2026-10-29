@@ -84,9 +84,11 @@ class Finding:
 
 
 def _payload_host(payload_value: str) -> str | None:
-    """Host part of a payload URL, if it parses as one."""
+    """Host part of a payload URL, if it parses as one (lowercased:
+    DNS names are case-insensitive, so echo matching must be too)."""
     parsed = urllib.parse.urlparse(payload_value)
-    return parsed.hostname
+    host = parsed.hostname
+    return host.lower() if host else None
 
 
 class _RedirectCaptured(Exception):
@@ -120,6 +122,11 @@ def _loose_host(value: str) -> str | None:
     text = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", "", text)
     text = text.lstrip("/")
     host = text.split("/")[0].split("@")[-1].split(":")[0]
+    # DNS names are case-insensitive and a trailing dot is the same host:
+    # "EVIL.EXAMPLE.COM" and "evil.example.com." must match the payload.
+    host = host.strip().lower()
+    if host.endswith("."):
+        host = host[:-1]
     return host or None
 
 
@@ -141,12 +148,17 @@ def classify(
     if target_status is None:
         return "ERROR", "request to target failed"
 
-    # Lab JSON replies carry ground truth about the server-side fetch.
+    # Lab JSON replies carry ground truth about the server-side fetch —
+    # but only when they carry the lab marker. Any JSON API can return a
+    # field named "fetched_status"; trusting it blindly would let an
+    # arbitrary target fake a FETCHED verdict, so the marker (which only
+    # the bundled lab emits) is required before the lab branch applies.
     try:
         lab = json.loads(body)
     except (ValueError, TypeError):
         lab = None
-    if isinstance(lab, dict) and "fetched_status" in lab:
+    if isinstance(lab, dict) and lab.get("lleap_lab") is True \
+            and "fetched_status" in lab:
         fetched = lab["fetched_status"]
         if fetched is not None and 200 <= fetched < 300:
             return "FETCHED", f"lab reports server-side fetch -> HTTP {fetched}"
@@ -171,9 +183,11 @@ def classify(
         final_host = _loose_host(final_url)
         payload_host = _loose_host(payload.value)
         if final_host and payload_host and final_host == payload_host:
-            return "OPEN-REDIRECT", f"client redirected to {final_host}"
+            return "OPEN-REDIRECT", (
+                f"client redirected to {term_safe(final_host)}"
+            )
     host = _payload_host(payload.value)
-    if host and host in body:
+    if host and host in body.lower():
         return "FETCHED", "payload host echoed in target response body"
     if any(marker in body for marker in METADATA_MARKERS):
         return "FETCHED", "cloud metadata marker present in response body"
@@ -198,18 +212,45 @@ def check_target_safety(target_template: str, allow_public: bool) -> None:
     host = urllib.parse.urlparse(sample).hostname
     if not host:
         raise ValueError("could not parse a host from the target URL")
-    try:
-        resolved = socket.gethostbyname(host)
-        addr = ipaddress.ip_address(resolved)
-    except (socket.gaierror, ValueError) as exc:
-        raise ValueError(f"cannot resolve target host {host!r}: {exc}") from exc
-    if addr.is_loopback or addr.is_private or addr.is_link_local:
+    addresses = _resolve_target_addresses(host)
+    if not addresses:
+        raise ValueError(f"cannot resolve target host {host!r}")
+    # Every resolved address must be local: gethostbyname only returned
+    # the first IPv4 answer, so an IPv6 loopback target ([::1]) was
+    # rejected outright, and a hostname with mixed public/private
+    # answers was judged on one address alone. A mixed answer is
+    # refused unless the operator opts in.
+    public = [str(a) for a in addresses
+              if not (a.is_loopback or a.is_private or a.is_link_local)]
+    if not public:
         return
     if not allow_public:
         raise ValueError(
-            f"target host {host!r} resolves to public IP {resolved}; "
+            f"target host {host!r} resolves to public IP {public[0]}; "
             "re-run with --allow-public-target if this is your own application"
         )
+
+
+def _resolve_target_addresses(host: str) -> list:
+    """All addresses for a target host: IP literals (v4 and v6) parse
+    directly, hostnames resolve with getaddrinfo (both families)."""
+    try:
+        return [ipaddress.ip_address(host)]
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return []
+    addresses = []
+    for info in infos:
+        try:
+            addr = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if addr not in addresses:
+            addresses.append(addr)
+    return addresses
 
 
 def _request_url(template: str, payload: Payload) -> str:

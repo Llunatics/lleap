@@ -45,6 +45,12 @@ def _common_scan_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _parse_sets(value: str) -> list[Payload]:
+    if not value.strip():
+        # An explicit empty --sets used to fall through to "all groups"
+        # silently; an empty selection is a typo, not a default.
+        print("lleap: error: --sets must name at least one payload group",
+              file=sys.stderr)
+        raise SystemExit(2)
     groups = tuple(part.strip() for part in value.split(",") if part.strip())
     try:
         return payloads_for(groups or None)
@@ -58,8 +64,13 @@ def _print_findings(findings, target, json_out, quiet) -> int:
         print(WARNING, file=sys.stderr)
     print(render_table(findings))
     if json_out:
-        with open(json_out, "w", encoding="utf-8") as handle:
-            handle.write(render_json(findings, target))
+        try:
+            with open(json_out, "w", encoding="utf-8") as handle:
+                handle.write(render_json(findings, target))
+        except OSError as exc:
+            print(f"lleap: error: cannot write JSON report to {json_out}: "
+                  f"{exc}", file=sys.stderr)
+            return 2
         print(f"\nJSON report written to {json_out}")
     worst = any(
         f.verdict in ("FETCHED", "OPEN-REDIRECT") for f in findings
@@ -68,6 +79,16 @@ def _print_findings(findings, target, json_out, quiet) -> int:
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
+    # Validate up front: a negative timeout used to surface as an
+    # all-ERROR scan with exit code 0 (indistinguishable from a clean
+    # target), and a negative delay only failed with a cryptic sleep
+    # error after the first request.
+    if args.timeout <= 0:
+        print("lleap: error: --timeout must be positive", file=sys.stderr)
+        return 2
+    if args.delay < 0:
+        print("lleap: error: --delay must not be negative", file=sys.stderr)
+        return 2
     payloads = _parse_sets(args.sets)
     try:
         findings = scan(
@@ -81,7 +102,16 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def cmd_lab(args: argparse.Namespace) -> int:
-    server, _log, port = start_lab(args.port)
+    if not 0 <= args.port <= 65535:
+        print(f"lleap: error: --port must be 0-65535, got {args.port}",
+              file=sys.stderr)
+        return 2
+    try:
+        server, _log, port = start_lab(args.port)
+    except OSError as exc:
+        print(f"lleap: error: cannot listen on port {args.port}: {exc}",
+              file=sys.stderr)
+        return 2
     print(f"lleap lab listening on http://127.0.0.1:{port} (loopback only)")
     print("Endpoints: /fetch?url=  /redirect?next=  /canary/<token>")
     print("Press Ctrl-C to stop. WARNING: the lab fetcher is intentionally")
@@ -130,7 +160,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    payloads = _parse_sets(args.sets) if args.sets else payloads_for()
+    payloads = _parse_sets(args.sets) if args.sets is not None \
+        else payloads_for()
     for payload in payloads:
         print(f"{payload.group:<9} {payload.value:<55} # {payload.note}")
     print(f"\n{len(payloads)} payload(s) in {len(set(p.group for p in payloads))} group(s).")
